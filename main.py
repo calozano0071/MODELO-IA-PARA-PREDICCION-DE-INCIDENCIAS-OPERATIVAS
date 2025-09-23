@@ -5,7 +5,7 @@ import joblib
 from sklearn.utils.class_weight import compute_class_weight
 from sklearn.metrics import classification_report, roc_auc_score, precision_recall_fscore_support, confusion_matrix
 
-from data_loader import cargar_datos
+from data_loader import cargar_datos, encode_labels
 from feature_engineering import make_daily_aggregates, build_time_series_for_combo, rolling_features, make_windows_from_series
 from model_lstm import build_lstm_model
 from evaluation import evaluate_model, plot_confusion_matrix
