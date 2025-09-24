@@ -44,3 +44,63 @@ def encode_labels(df, out_dir="models"):
     joblib.dump(le_tipo, os.path.join(out_dir, "le_tipo.pkl"))
 
     return df, le_host, le_tipo
+
+import numpy as np
+import pandas as pd
+
+def preparar_datos_prediccion(df, le_host, le_tipo, ventana=180):
+    """
+    Prepara datos de un archivo nuevo para generar predicciones.
+    Devuelve X_seq, X_static, X_host y un DataFrame meta (host, tipo, fecha).
+    """
+    # Aseguramos formato de fecha
+    df["Hora Inicio"] = pd.to_datetime(df["Hora Inicio"])
+    df = df.sort_values("Hora Inicio").reset_index(drop=True)
+
+    # Codificar host y tipo con los encoders entrenados
+    df["host_enc"] = le_host.transform(df["Host"])
+    df["tipo_enc"] = le_tipo.transform(df["Tipo de falla"])
+
+    # Crear series de conteo diario (como en entrenamiento)
+    df["dia"] = df["Hora Inicio"].dt.date
+    conteos = df.groupby(["dia", "host_enc", "tipo_enc"]).size().reset_index(name="conteo")
+
+    # Expandir a serie temporal completa
+    dias = pd.date_range(conteos["dia"].min(), conteos["dia"].max(), freq="D")
+    combos = conteos[["host_enc", "tipo_enc"]].drop_duplicates()
+
+    registros = []
+    for _, row in combos.iterrows():
+        h, t = row["host_enc"], row["tipo_enc"]
+        serie = pd.DataFrame({"dia": dias})
+        serie["host_enc"] = h
+        serie["tipo_enc"] = t
+        serie = serie.merge(conteos, on=["dia", "host_enc", "tipo_enc"], how="left").fillna(0)
+        registros.append(serie)
+
+    full = pd.concat(registros, ignore_index=True)
+
+    # --- Crear ventanas ---
+    X_seq, X_static, X_host, metas = [], [], [], []
+    for (h, t), grupo in full.groupby(["host_enc", "tipo_enc"]):
+        valores = grupo["conteo"].values
+        fechas = grupo["dia"].values
+
+        for i in range(len(valores) - ventana):
+            seq = valores[i:i+ventana]
+            X_seq.append(seq.reshape(-1, 1))
+            X_static.append([np.mean(seq), np.std(seq), np.min(seq), np.max(seq), ventana, t])
+            X_host.append([h])
+            metas.append({
+                "host": le_host.inverse_transform([h])[0],
+                "tipo": le_tipo.inverse_transform([t])[0],
+                "fecha": fechas[i+ventana]
+            })
+
+    X_seq = np.array(X_seq)
+    X_static = np.array(X_static)
+    X_host = np.array(X_host)
+    meta_df = pd.DataFrame(metas)
+
+    return X_seq, X_static, X_host, meta_df
+
