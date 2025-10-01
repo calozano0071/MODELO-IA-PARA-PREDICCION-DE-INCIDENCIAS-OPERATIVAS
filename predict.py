@@ -1,55 +1,131 @@
 import argparse
-import pandas as pd
 import numpy as np
-import joblib
+import pandas as pd
+import matplotlib.pyplot as plt
 from tensorflow.keras.models import load_model
-from data_loader import preparar_datos_prediccion
+import joblib
 
-def cargar_modelo_y_encoders():
-    """Carga modelo y encoders guardados en model_output/"""
-    model = load_model("model_output/final_model.h5")
-    le_host = joblib.load("model_output/le_host.joblib")
-    le_tipo = joblib.load("model_output/le_tipo.joblib")
-    return model, le_host, le_tipo
+from data_loader import cargar_datos, preparar_datos_prediccion
 
-def predecir(model, X_seq, X_static, X_host, threshold=0.5):
-    """Ejecuta predicciones y retorna etiquetas y probabilidades"""
-    probs = model.predict([X_seq, X_static, X_host], verbose=0).flatten()
-    preds = (probs >= threshold).astype(int)
-    return probs, preds
 
 def main(args):
-    print(f"Cargando archivo: {args.excel}")
-    df = pd.read_excel(args.excel)
+    print(f"📂 Usando archivo: {args.excel}")
 
-    # --- Cargar modelo y encoders ---
-    model, le_host, le_tipo = cargar_modelo_y_encoders()
+    # ✅ Cargar datos
+    df = cargar_datos(args.excel)
 
-    # --- Preparar datos (mismo pipeline que en entrenamiento) ---
-    print("Preparando datos para predicción...")
-    X_seq, X_static, X_host, meta = preparar_datos_prediccion(
-        df, le_host=le_host, le_tipo=le_tipo, ventana=args.ventana
+    # ✅ Cargar encoders
+    le_host = joblib.load("models/le_host.pkl")
+    le_tipo = joblib.load("models/le_tipo.pkl")
+
+    # ✅ Preparar datos para predicción
+    X_seq, X_static, X_host, X_tipo, meta = preparar_datos_prediccion(
+        df, le_host, le_tipo, ventana=args.ventana
     )
 
-    # --- Generar predicciones ---
-    print("Generando predicciones...")
-    probs, preds = predecir(model, X_seq, X_static, X_host, threshold=args.threshold)
+    if len(X_seq) == 0:
+        print("⚠️ No hay datos suficientes para generar predicciones.")
+        return
 
-    # --- Guardar resultados ---
-    resultados = meta.copy()
-    resultados["prob_falla"] = probs
-    resultados["prediccion"] = preds
+    # ✅ Cargar modelo multitarea
+    model = load_model("models/best_model.keras")
+    print("✅ Modelo cargado.")
 
-    out_file = "predicciones.xlsx"
-    resultados.to_excel(out_file, index=False)
-    print(f"\n✅ Predicciones guardadas en: {out_file}")
-    print(resultados.head(10))
+    # ============================
+    # 🔹 Predicciones históricas
+    # ============================
+    preds_day, preds_week, preds_month = model.predict(
+        {"seq_in": X_seq, "static_in": X_static, "host_in": X_host, "tipo_in": X_tipo},
+        verbose=0
+    )
+
+    meta["pred_day"] = preds_day.flatten()
+    meta["pred_week"] = preds_week.flatten()
+    meta["pred_month"] = preds_month.flatten()
+
+    print("\n📊 Últimas 10 predicciones históricas:")
+    print(meta.tail(10)[["fecha", "host", "tipo", "pred_day", "pred_week", "pred_month"]])
+
+    # ============================
+    # 🔹 Predicciones futuras
+    # ============================
+    print(f"\n🔮 Prediciendo {args.horizonte} días hacia adelante...")
+
+    last_seq = X_seq[-1].copy()
+    last_static = X_static[-1].copy()
+    last_host = X_host[-1]
+    last_tipo = X_tipo[-1]
+    last_date = pd.to_datetime(meta["fecha"].iloc[-1])
+
+    future_records = []
+
+    for i in range(args.horizonte):
+        preds = model.predict(
+            {
+                "seq_in": last_seq[np.newaxis, ...],
+                "static_in": last_static[np.newaxis, ...],
+                "host_in": last_host[np.newaxis, ...],
+                "tipo_in": last_tipo[np.newaxis, ...],
+            },
+            verbose=0
+        )
+
+        p_day, p_week, p_month = [p[0, 0] for p in preds]
+        next_date = last_date + pd.Timedelta(days=i + 1)
+
+        future_records.append({
+            "fecha": next_date,
+            "host": le_host.inverse_transform(last_host)[0],
+            "tipo": le_tipo.inverse_transform(last_tipo)[0],
+            "pred_day": p_day,
+            "pred_week": p_week,
+            "pred_month": p_month,
+        })
+
+        # Actualizar secuencia (usamos pred_day como input futuro)
+        new_seq = np.roll(last_seq, -1, axis=0)
+        new_seq[-1, 0] = p_day
+        last_seq = new_seq
+
+    future_df = pd.DataFrame(future_records)
+    print("\n✅ Predicciones futuras generadas.")
+    print(future_df.head())
+
+    # ============================
+    # 🔹 Guardar resultados
+    # ============================
+    out_file = "predicciones.csv"
+    all_results = pd.concat([meta, future_df], ignore_index=True)
+    all_results.to_csv(out_file, index=False)
+    print(f"\n💾 Resultados guardados en {out_file}")
+
+    # ============================
+    # 🔹 Graficar resultados
+    # ============================
+    for (h, t), grupo in all_results.groupby(["host", "tipo"]):
+        plt.figure(figsize=(12, 6))
+        plt.plot(grupo["fecha"], grupo["pred_day"], label="Predicción Día", color="blue")
+        plt.plot(grupo["fecha"], grupo["pred_week"], label="Predicción Semana", color="orange")
+        plt.plot(grupo["fecha"], grupo["pred_month"], label="Predicción Mes", color="green")
+
+        plt.title(f"Predicciones para Host={h}, Tipo={t}")
+        plt.xlabel("Fecha")
+        plt.ylabel("Predicción")
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+
+        out_img = f"pred_{h}_{t}.png"
+        plt.savefig(out_img)
+        plt.close()
+        print(f"📈 Gráfico guardado en {out_img}")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Predicciones con modelo entrenado")
-    parser.add_argument("--excel", type=str, required=True, help="Archivo Excel con nuevos datos")
-    parser.add_argument("--ventana", type=int, default=180, help="Tamaño de ventana usado en entrenamiento")
-    parser.add_argument("--threshold", type=float, default=0.5, help="Umbral de clasificación (0-1)")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--excel", type=str, required=True)
+    parser.add_argument("--ventana", type=int, default=180)
+    parser.add_argument("--horizonte", type=int, default=30)
     args = parser.parse_args()
+
     main(args)

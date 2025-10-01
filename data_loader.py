@@ -1,7 +1,9 @@
 import pandas as pd
 import os
 import joblib
+import numpy as np
 from sklearn.preprocessing import LabelEncoder
+
 
 def cargar_datos(path):
     """
@@ -9,11 +11,11 @@ def cargar_datos(path):
     """
     df = pd.read_excel(path)
 
-    # Normalizamos nombres de columnas (ej: "Hora Inicio" -> "hora_inicio")
+    # Normalizamos nombres de columnas
     df.columns = (
-        df.columns.str.strip()     # quitamos espacios
-                  .str.lower()     # pasamos a minúsculas
-                  .str.replace(" ", "_")  # reemplazamos espacios por "_"
+        df.columns.str.strip()
+                  .str.lower()
+                  .str.replace(" ", "_")
     )
 
     # Renombramos "tipo_de_falla" -> "tipo_falla" para consistencia
@@ -30,59 +32,68 @@ def cargar_datos(path):
 
     return df
 
+
 def encode_labels(df, out_dir="models"):
     """Codifica las etiquetas categóricas host y tipo_falla."""
     os.makedirs(out_dir, exist_ok=True)
 
     le_host = LabelEncoder()
-    df["host_id"] = le_host.fit_transform(df["host"])   # 👈 ahora se llama host_id
+    df["host_id"] = le_host.fit_transform(df["host"])
 
     le_tipo = LabelEncoder()
-    df["tipo_id"] = le_tipo.fit_transform(df["tipo_falla"])   # 👈 ahora se llama tipo_id
+    df["tipo_id"] = le_tipo.fit_transform(df["tipo_falla"])
 
     joblib.dump(le_host, os.path.join(out_dir, "le_host.pkl"))
     joblib.dump(le_tipo, os.path.join(out_dir, "le_tipo.pkl"))
 
     return df, le_host, le_tipo
 
-import numpy as np
-import pandas as pd
 
-def preparar_datos_prediccion(df, le_host, le_tipo, ventana=180):
+def _make_windows(df, le_host, le_tipo, ventana=30):
     """
-    Prepara datos de un archivo nuevo para generar predicciones.
-    Devuelve X_seq, X_static, X_host y un DataFrame meta (host, tipo, fecha).
+    Función auxiliar: crea ventanas para un horizonte dado.
     """
-    # Aseguramos formato de fecha
-    df["Hora Inicio"] = pd.to_datetime(df["Hora Inicio"])
-    df = df.sort_values("Hora Inicio").reset_index(drop=True)
+    # Normalizar nombres
+    df.columns = (
+        df.columns.str.strip()
+                  .str.lower()
+                  .str.replace(" ", "_")
+    )
 
-    # Codificar host y tipo con los encoders entrenados
-    df["host_enc"] = le_host.transform(df["Host"])
-    df["tipo_enc"] = le_tipo.transform(df["Tipo de falla"])
+    if "hora_inicio" not in df.columns:
+        raise ValueError("El archivo debe contener la columna 'hora_inicio'")
 
-    # Crear series de conteo diario (como en entrenamiento)
-    df["dia"] = df["Hora Inicio"].dt.date
-    conteos = df.groupby(["dia", "host_enc", "tipo_enc"]).size().reset_index(name="conteo")
+    df["hora_inicio"] = pd.to_datetime(df["hora_inicio"], errors="coerce")
+    df = df.sort_values("hora_inicio").reset_index(drop=True)
 
-    # Expandir a serie temporal completa
+    # Codificar host y tipo
+    df["host_id"] = le_host.transform(df["host"])
+    df["tipo_id"] = le_tipo.transform(df["tipo_falla"])
+
+    # Crear series de conteo diario
+    df["dia"] = df["hora_inicio"].dt.normalize()
+    conteos = df.groupby(["dia", "host_id", "tipo_id"]).size().reset_index(name="conteo")
+
+    # Expandir series por host/tipo
     dias = pd.date_range(conteos["dia"].min(), conteos["dia"].max(), freq="D")
-    combos = conteos[["host_enc", "tipo_enc"]].drop_duplicates()
+    combos = conteos[["host_id", "tipo_id"]].drop_duplicates()
 
     registros = []
     for _, row in combos.iterrows():
-        h, t = row["host_enc"], row["tipo_enc"]
+        h, t = row["host_id"], row["tipo_id"]
         serie = pd.DataFrame({"dia": dias})
-        serie["host_enc"] = h
-        serie["tipo_enc"] = t
-        serie = serie.merge(conteos, on=["dia", "host_enc", "tipo_enc"], how="left").fillna(0)
+        serie["host_id"] = h
+        serie["tipo_id"] = t
+        serie["dia"] = pd.to_datetime(serie["dia"]).dt.normalize()
+        conteos["dia"] = pd.to_datetime(conteos["dia"]).dt.normalize()
+        serie = serie.merge(conteos, on=["dia", "host_id", "tipo_id"], how="left").fillna(0)
         registros.append(serie)
 
     full = pd.concat(registros, ignore_index=True)
 
     # --- Crear ventanas ---
-    X_seq, X_static, X_host, metas = [], [], [], []
-    for (h, t), grupo in full.groupby(["host_enc", "tipo_enc"]):
+    X_seq, X_static, X_host, X_tipo, metas = [], [], [], [], []
+    for (h, t), grupo in full.groupby(["host_id", "tipo_id"]):
         valores = grupo["conteo"].values
         fechas = grupo["dia"].values
 
@@ -91,16 +102,28 @@ def preparar_datos_prediccion(df, le_host, le_tipo, ventana=180):
             X_seq.append(seq.reshape(-1, 1))
             X_static.append([np.mean(seq), np.std(seq), np.min(seq), np.max(seq), ventana, t])
             X_host.append([h])
+            X_tipo.append([t])
             metas.append({
                 "host": le_host.inverse_transform([h])[0],
                 "tipo": le_tipo.inverse_transform([t])[0],
                 "fecha": fechas[i+ventana]
             })
 
-    X_seq = np.array(X_seq)
-    X_static = np.array(X_static)
-    X_host = np.array(X_host)
-    meta_df = pd.DataFrame(metas)
+    return (
+        np.array(X_seq),
+        np.array(X_static),
+        np.array(X_host),
+        np.array(X_tipo),
+        pd.DataFrame(metas)
+    )
 
-    return X_seq, X_static, X_host, meta_df
 
+def preparar_datos_prediccion(df, le_host, le_tipo, ventanas=[1, 7, 30]):
+    """
+    Prepara datos para generar predicciones en varios horizontes (día, semana, mes).
+    Devuelve un diccionario {horizonte: (X_seq, X_static, X_host, X_tipo, meta_df)}.
+    """
+    resultados = {}
+    for v in ventanas:
+        resultados[v] = _make_windows(df, le_host, le_tipo, ventana=v)
+    return resultados

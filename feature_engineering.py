@@ -59,3 +59,38 @@ def make_windows_from_series(df_ts, window=180):
         ys.append(y)
         dates.append(target_date)
     return seqs, statics, ys, dates
+
+import pandas as pd
+import numpy as np
+
+def make_daily_aggregates(df):
+    df["date"] = pd.to_datetime(df["hora_inicio"]).dt.date
+    agg = df.groupby(['host', 'tipo_falla', 'date']).size().reset_index(name='n_fallas')
+    return agg
+
+def build_time_series_for_combo(daily, host, tipo, ventana=180):
+    """
+    Construye secuencias temporales para un host/tipo específico.
+    """
+    subset = daily[(daily["host"] == host) & (daily["tipo_falla"] == tipo)].copy()
+    if subset.empty:
+        return [], [], [], []
+
+    subset = subset.set_index("date").asfreq("D", fill_value=0).reset_index()
+    seqs, statics, ys, dates = [], [], [], []
+
+    values = subset["n_fallas"].values
+    for i in range(len(values) - ventana):
+        seqs.append(values[i:i+ventana].reshape(-1, 1))
+        statics.append([0])  # Placeholder estático
+        ys.append(values[i+ventana])
+        dates.append(subset["date"].iloc[i+ventana])
+
+    return np.array(seqs), np.array(statics), np.array(ys), np.array(dates)
+
+def preparar_series(df, host, tipo, ventana=180):
+    """
+    Wrapper que integra agregación diaria y construcción de secuencias.
+    """
+    daily = make_daily_aggregates(df)
+    return build_time_series_for_combo(daily, host, tipo, ventana)
