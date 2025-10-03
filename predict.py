@@ -42,6 +42,7 @@ def main(args):
     meta["pred_day"] = preds_day.flatten()
     meta["pred_week"] = preds_week.flatten()
     meta["pred_month"] = preds_month.flatten()
+    meta["es_futuro"] = False
 
     print("\n📊 Últimas 10 predicciones históricas:")
     print(meta.tail(10)[["fecha", "host", "tipo", "pred_day", "pred_week", "pred_month"]])
@@ -73,18 +74,29 @@ def main(args):
         p_day, p_week, p_month = [p[0, 0] for p in preds]
         next_date = last_date + pd.Timedelta(days=i + 1)
 
+        try:
+            host_decoded = le_host.inverse_transform(last_host)[0]
+        except Exception:
+            host_decoded = "UNKNOWN"
+
+        try:
+            tipo_decoded = le_tipo.inverse_transform(last_tipo)[0]
+        except Exception:
+            tipo_decoded = "UNKNOWN"
+
         future_records.append({
             "fecha": next_date,
-            "host": le_host.inverse_transform(last_host)[0],
-            "tipo": le_tipo.inverse_transform(last_tipo)[0],
+            "host": host_decoded,
+            "tipo": tipo_decoded,
             "pred_day": p_day,
             "pred_week": p_week,
             "pred_month": p_month,
+            "es_futuro": True
         })
 
-        # Actualizar secuencia (usamos pred_day como input futuro)
+        # 🔄 Actualizar secuencia (por ahora solo target diario)
         new_seq = np.roll(last_seq, -1, axis=0)
-        new_seq[-1, 0] = p_day
+        new_seq[-1, 0] = p_day   # ⚠️ Asumimos que feature 0 es el target
         last_seq = new_seq
 
     future_df = pd.DataFrame(future_records)
@@ -107,6 +119,10 @@ def main(args):
         plt.plot(grupo["fecha"], grupo["pred_day"], label="Predicción Día", color="blue")
         plt.plot(grupo["fecha"], grupo["pred_week"], label="Predicción Semana", color="orange")
         plt.plot(grupo["fecha"], grupo["pred_month"], label="Predicción Mes", color="green")
+
+        # 🔹 Si hay valores reales en histórico, graficarlos
+        if "target" in grupo.columns:
+            plt.plot(grupo["fecha"], grupo["target"], label="Real", color="black", linestyle="dashed")
 
         plt.title(f"Predicciones para Host={h}, Tipo={t}")
         plt.xlabel("Fecha")

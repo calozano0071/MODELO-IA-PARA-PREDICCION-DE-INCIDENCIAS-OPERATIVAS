@@ -2,9 +2,10 @@ import os
 import tensorflow as tf
 from tensorflow.keras import layers, models, callbacks
 
+
 def build_model(seq_len, n_hosts, n_tipos, out_dir="models", lr=1e-3):
     """
-    Construye un modelo multitarea que predice el tipo de falla por día, semana y mes.
+    Construye un modelo multitarea multihorizonte (día, semana, mes).
     """
     # Entrada secuencial (ventanas históricas)
     seq_in = layers.Input(shape=(seq_len, 1), name="seq_in")
@@ -32,10 +33,10 @@ def build_model(seq_len, n_hosts, n_tipos, out_dir="models", lr=1e-3):
     base = layers.Dense(128, activation="relu")(concat)
     base = layers.Dropout(0.3)(base)
 
-    # Salidas múltiples (multiclase softmax)
-    out_day = layers.Dense(n_tipos, activation="softmax", name="out_day")(base)
-    out_week = layers.Dense(n_tipos, activation="softmax", name="out_week")(base)
-    out_month = layers.Dense(n_tipos, activation="softmax", name="out_month")(base)
+    # Salidas múltiples (binarias para predicción de falla sí/no)
+    out_day = layers.Dense(1, activation="sigmoid", name="out_day")(base)
+    out_week = layers.Dense(1, activation="sigmoid", name="out_week")(base)
+    out_month = layers.Dense(1, activation="sigmoid", name="out_month")(base)
 
     model = models.Model(
         inputs=[seq_in, static_in, host_in, tipo_in],
@@ -45,9 +46,9 @@ def build_model(seq_len, n_hosts, n_tipos, out_dir="models", lr=1e-3):
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=lr),
         loss={
-            "out_day": "sparse_categorical_crossentropy",
-            "out_week": "sparse_categorical_crossentropy",
-            "out_month": "sparse_categorical_crossentropy",
+            "out_day": "binary_crossentropy",
+            "out_week": "binary_crossentropy",
+            "out_month": "binary_crossentropy",
         },
         metrics={
             "out_day": ["accuracy"],
@@ -68,14 +69,13 @@ def entrenar_y_evaluar(
     Xs_test, y_test,
     n_hosts, n_tipos,
     output_dir="models",
-    use_class_weights=True,
     patience=6,
-    threshold=0.5,
     epochs=30,
     batch_size=128
 ):
     """
-    Entrena y evalúa el modelo multitarea (multiclase).
+    Entrena y evalúa el modelo multitarea multihorizonte (día, semana, mes).
+    y_* deben ser diccionarios: {"out_day": ..., "out_week": ..., "out_month": ...}
     """
     model = build_model(
         seq_len=Xs_train["seq_in"].shape[1],
@@ -84,7 +84,7 @@ def entrenar_y_evaluar(
         out_dir=output_dir
     )
 
-    # Guardado y early stopping
+    # Callbacks
     cb = [
         callbacks.EarlyStopping(patience=patience, restore_best_weights=True),
         callbacks.ModelCheckpoint(
