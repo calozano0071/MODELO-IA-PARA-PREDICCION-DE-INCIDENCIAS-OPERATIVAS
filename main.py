@@ -2,7 +2,7 @@ import argparse
 import os
 import numpy as np
 from sklearn.model_selection import train_test_split
-
+import matplotlib.pyplot as plt
 from data_loader import cargar_datos, encode_labels
 from feature_engineering import preparar_series
 from trainer import entrenar_y_evaluar
@@ -70,7 +70,21 @@ def main(args):
 
     print("📊 Evaluación final en test:")
     print(metrics)
+ # --- Graficar evolución del entrenamiento ---
+    hist = history.history
 
+    plt.figure(figsize=(14, 8))
+    for key in hist.keys():
+        plt.plot(hist[key], label=key)
+    plt.title("Evolución de entrenamiento y validación")
+    plt.xlabel("Épocas")
+    plt.ylabel("Valor")
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(os.path.join(args.out_dir, "training_history.png"))
+    plt.show()
+    print(f"📈 Gráfico de entrenamiento guardado en {os.path.join(args.out_dir, 'training_history.png')}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
